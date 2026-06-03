@@ -141,7 +141,8 @@ def load_tracks(path, idx, flip=False):
     cp = _cache_key(idx, flip)
     if not flip and os.path.exists(cp):
         d = np.load(cp)
-        return d["X"], d["mask"], d["y"]
+        if "origins" in d:
+            return d["X"], d["mask"], d["y"], d["origins"]
 
     with h5py.File(path, "r") as f:
         flavour_id = f["jets"]["HadronConeExclTruthLabelID"][idx]
@@ -187,36 +188,47 @@ def load_tracks(path, idx, flip=False):
 
     labels = np.array([FLAVOUR_TO_LABEL[v] for v in flavour_id[keep_jet]], dtype=np.int64)
 
+    topk_origin = origin[rows, topk_idx].astype(np.int64)
+    topk_origin[~topk_valid] = -1   # mask padding with ignore_index
+
     if not flip:
-        np.savez(cp, X=topk_feat, mask=topk_valid, y=labels)
-    return topk_feat, topk_valid, labels
+        np.savez(cp, X=topk_feat, mask=topk_valid, y=labels, origins=topk_origin)
+    return topk_feat, topk_valid, labels, topk_origin
 
 
 class JetDataset(Dataset):
-    def __init__(self, X, mask, y):
-        self.X    = torch.from_numpy(X)
-        self.mask = torch.from_numpy(mask)
-        self.y    = torch.from_numpy(y)
+    def __init__(self, X, mask, y, origins):
+        self.X       = torch.from_numpy(X)
+        self.mask    = torch.from_numpy(mask)
+        self.y       = torch.from_numpy(y)
+        self.origins = torch.from_numpy(origins)
     def __len__(self): return len(self.y)
-    def __getitem__(self, i): return self.X[i], self.mask[i], self.y[i]
+    def __getitem__(self, i): return self.X[i], self.mask[i], self.y[i], self.origins[i]
 
 
 # ── model (must match transformer_jet_classifier.py exactly) ──────────
+N_ORIGINS = cfg["n_origins"]
+
 class JetTransformer(nn.Module):
-    def __init__(self, in_dim, d_model, n_heads, n_layers, d_ffn, dropout, n_classes):
+    def __init__(self, in_dim, d_model, n_heads, n_layers, d_ffn, dropout,
+                 n_classes, n_origins):
         super().__init__()
-        self.input_proj = nn.Linear(in_dim, d_model)
-        self.cls_token  = nn.Parameter(torch.zeros(1, 1, d_model))
+        self.input_proj  = nn.Linear(in_dim, d_model)
+        self.cls_token   = nn.Parameter(torch.zeros(1, 1, d_model))
         nn.init.trunc_normal_(self.cls_token, std=0.02)
 
         encoder_layer = nn.TransformerEncoderLayer(
             d_model=d_model, nhead=n_heads, dim_feedforward=d_ffn,
             dropout=dropout, batch_first=True, norm_first=True,
         )
-        self.encoder    = nn.TransformerEncoder(encoder_layer, num_layers=n_layers)
-        self.classifier = nn.Sequential(
+        self.encoder     = nn.TransformerEncoder(encoder_layer, num_layers=n_layers)
+        self.classifier  = nn.Sequential(
             nn.LayerNorm(d_model),
             nn.Linear(d_model, n_classes),
+        )
+        self.origin_head = nn.Sequential(
+            nn.LayerNorm(d_model),
+            nn.Linear(d_model, n_origins),
         )
 
     def forward(self, x, mask):
@@ -229,7 +241,7 @@ class JetTransformer(nn.Module):
         src_key_padding_mask = ~torch.cat([cls_valid, mask], dim=1)
 
         h = self.encoder(h, src_key_padding_mask=src_key_padding_mask)
-        return self.classifier(h[:, 0])
+        return self.classifier(h[:, 0]), self.origin_head(h[:, 1:])
 
 
 # ── load data (jets not seen during training/testing) ─────────────────
@@ -240,37 +252,48 @@ with h5py.File(DATA_FILE, "r") as f:
 all_idx = rng.permutation(n_total)
 val_idx = np.sort(all_idx[N_SKIP:N_SKIP + N_VAL])
 
-X_val,      mask_val,      y_val  = load_tracks(DATA_FILE, val_idx, flip=False)
-X_val_flip, mask_val_flip, _      = load_tracks(DATA_FILE, val_idx, flip=True)
+X_val,      mask_val,      y_val, origins_val = load_tracks(DATA_FILE, val_idx, flip=False)
+X_val_flip, mask_val_flip, _,    _            = load_tracks(DATA_FILE, val_idx, flip=True)
 print(f"Validation jets: {len(y_val):,}  "
       f"(b={(y_val==0).sum():,}  c={(y_val==1).sum():,}  light={(y_val==2).sum():,})")
 
-nom_loader  = DataLoader(JetDataset(X_val,      mask_val,      y_val), batch_size=BATCH_SIZE)
-flip_loader = DataLoader(JetDataset(X_val_flip, mask_val_flip, y_val), batch_size=BATCH_SIZE)
+nom_loader  = DataLoader(JetDataset(X_val,      mask_val,      y_val, origins_val), batch_size=BATCH_SIZE)
+flip_loader = DataLoader(JetDataset(X_val_flip, mask_val_flip, y_val, origins_val), batch_size=BATCH_SIZE)
 
 # ── load model ────────────────────────────────────────────────────────
-model = JetTransformer(N_FEATS, D_MODEL, N_HEADS, N_LAYERS, D_FFN, DROPOUT, n_classes=3).to(DEVICE)
+model = JetTransformer(N_FEATS, D_MODEL, N_HEADS, N_LAYERS, D_FFN, DROPOUT,
+                       n_classes=3, n_origins=N_ORIGINS).to(DEVICE)
 model.load_state_dict(torch.load(MODEL_FILE, map_location=DEVICE))
 model.eval()
 n_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
 print(f"Loaded {MODEL_FILE}  ({n_params:,} parameters)")
 
 # ── inference ─────────────────────────────────────────────────────────
-def run_inference(loader):
+def run_inference(loader, collect_origins=False):
     preds, trues, probs = [], [], []
+    origin_preds, origin_trues = [], []
     with torch.no_grad():
-        for X_b, mask_b, y_b in loader:
+        for X_b, mask_b, y_b, orig_b in loader:
             X_b, mask_b, y_b = X_b.to(DEVICE), mask_b.to(DEVICE), y_b.to(DEVICE)
-            logits = model(X_b, mask_b)
+            logits, track_logits = model(X_b, mask_b)
             preds.append(logits.argmax(dim=1).cpu())
             trues.append(y_b.cpu())
             probs.append(torch.softmax(logits, dim=1).cpu())
-    return (torch.cat(preds).numpy(),
-            torch.cat(trues).numpy(),
-            torch.cat(probs).numpy())
+            if collect_origins:
+                origin_preds.append(track_logits.argmax(dim=-1).cpu())
+                origin_trues.append(orig_b)
+    result = (torch.cat(preds).numpy(),
+              torch.cat(trues).numpy(),
+              torch.cat(probs).numpy())
+    if collect_origins:
+        op = torch.cat(origin_preds).numpy().ravel()
+        ot = torch.cat(origin_trues).numpy().ravel()
+        valid_tracks = ot >= 0
+        return result + (op[valid_tracks], ot[valid_tracks])
+    return result
 
 print("Running inference on nominal inputs...")
-all_preds, all_true, all_probs = run_inference(nom_loader)
+all_preds, all_true, all_probs, origin_preds, origin_true = run_inference(nom_loader, collect_origins=True)
 print("Running inference on flipped inputs...")
 _, _, all_probs_flip = run_inference(flip_loader)
 
@@ -322,6 +345,28 @@ for ax in axes[N_FEATS:]:
 plt.tight_layout()
 plt.savefig(PLOT_DIR + "val_input_variables.png", dpi=150, bbox_inches="tight")
 print("Saved val_input_variables.png")
+
+# ── plot: track origin confusion matrix ──────────────────────────────
+ORIGIN_NAMES = ["Pileup", "Fake", "Primary", "From b", "From b→c", "From c", "From τ", "Other sec."]
+present      = sorted(np.unique(origin_true))
+labels_pres  = [ORIGIN_NAMES[i] for i in present]
+
+cm_orig = confusion_matrix(origin_true, origin_preds, labels=present, normalize="true")
+fig, ax = plt.subplots(figsize=(9, 7))
+fig.suptitle("Track origin confusion matrix (normalised)", fontweight="bold")
+im = ax.imshow(cm_orig, cmap="Blues", vmin=0, vmax=1)
+ax.set_xticks(range(len(present))); ax.set_yticks(range(len(present)))
+ax.set_xticklabels(labels_pres, rotation=45, ha="right", fontsize=8)
+ax.set_yticklabels(labels_pres, fontsize=8)
+ax.set_xlabel("Predicted origin"); ax.set_ylabel("True origin")
+for i in range(len(present)):
+    for j in range(len(present)):
+        ax.text(j, i, f"{cm_orig[i,j]:.2f}", ha="center", va="center", fontsize=7,
+                color="white" if cm_orig[i,j] > 0.5 else "black")
+plt.colorbar(im, ax=ax)
+plt.tight_layout()
+plt.savefig(PLOT_DIR + "val_origin_confusion.png", dpi=150, bbox_inches="tight")
+print("Saved val_origin_confusion.png")
 
 # ── plot: confusion matrix ────────────────────────────────────────────
 fig, ax = plt.subplots(figsize=(5, 4))
