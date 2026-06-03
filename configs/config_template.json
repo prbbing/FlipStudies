@@ -1,22 +1,21 @@
 {
-    "data_file":      "mc-flavtag-ttbar-small.h5",
-    "model_file":     "models_cluster/transformer_jet_classifier_nomimal_btrackorigin_training.pt",
-    "plot_dir":       "./transformer_results_val_nominal_boriginflip_origintrain_cluster/",
-    "cache_dir":      ".track_cache_val_new/",
-
-    "n_skip":         1200000,
-    "n_val":          150000,
-    "top_k":          40,
-    "batch_size":     400,
-    "n_origins":      8,
-
-    "flip_sharpness": 10,
-    "flip_threshold": 0.3,
+    "train_file":      "/large-data/transformer/jetset/93940/mc-flavtag-ttbar-small.h5",
+    "n_train":         1200000,
+    "n_test":          600000,
+    "batch_size":      1024,
+    "epochs":          100,
+    "lr":              0.001,
+    "top_k":           40,
+    "lambda_sym":      0.0,
+    "b_ratio":         0.0,
+    "model_name":      "transformer_jet_classifier_nominal.pt",
+    "train_plot_dir":  "./transformer_results_nominal/",
+    "train_cache_dir": ".track_cache/",
 
     "d_model":  32,
     "n_heads":  2,
     "n_layers": 2,
-    "d_ffn":    64,
+    "d_ffn":    32,
     "dropout":  0.1,
 
     "track_fields": [
@@ -39,21 +38,8 @@
     "flavour_to_label": {"5": 0, "4": 1, "0": 2},
     "class_names":      ["b-jet", "c-jet", "light-jet"],
     "colours": {
-        "b-jet":      "#1f77b4",
-        "c-jet":      "#ff7f0e",
-        "light-jet":  "#2ca02c"
-    },
-
-    "train_file":   "/large-data/transformer/jetset/93940/mc-flavtag-ttbar-small.h5",
-    "n_train":      1200000,
-    "n_test":       600000,
-    "epochs":       100,
-    "lr":           0.001,
-    "num_workers":  8,
-    "lambda_sym":   100,
-    "lambda_orig":  1,
-    "b_ratio":      0.0,
-    "model_name":   "transformer_jet_classifier_nomimal_btrackorigin_training.pt",
-    "train_plot_dir":  "./transformer_results_nomimal_btrackorigin_training/",
-    "train_cache_dir": ".track_cache_new/"
+        "b-jet":     "#1f77b4",
+        "c-jet":     "#ff7f0e",
+        "light-jet": "#2ca02c"
+    }
 }
