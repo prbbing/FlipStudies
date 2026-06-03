@@ -117,6 +117,11 @@ N_FEATS = len(TRACK_FIELDS)
 os.makedirs(PLOT_DIR,  exist_ok=True)
 os.makedirs(CACHE_DIR, exist_ok=True)
 
+_cfg_save_path = os.path.join(PLOT_DIR, "config.json")
+with open(_cfg_save_path, "w") as _f:
+    json.dump(cfg, _f, indent=4)
+print(f"Config saved to {_cfg_save_path}")
+
 # ── data loading ──────────────────────────────────────────────────────
 def _cache_key(idx):
     h = hashlib.md5(idx.tobytes()).hexdigest()[:12]
