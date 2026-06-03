@@ -1,0 +1,46 @@
+{
+    "data_file":      "mc-flavtag-ttbar-small.h5",
+    "model_file":     "models_cluster/transformer_jet_classifier_nomimal_btrackorigin_training.pt",
+    "plot_dir":       "./transformer_results_val_nominal_boriginflip_origintrain_cluster/",
+    "cache_dir":      ".track_cache_val_new/",
+
+    "n_skip":         1200000,
+    "n_val":          150000,
+    "top_k":          40,
+    "batch_size":     400,
+    "n_origins":      8,
+
+    "flip_sharpness": 10,
+    "flip_threshold": 0.5,
+
+    "d_model":  32,
+    "n_heads":  2,
+    "n_layers": 2,
+    "d_ffn":    64,
+    "dropout":  0.1,
+
+    "track_fields": [
+        "qOverP", "deta", "dphi", "d0", "z0SinTheta",
+        "qOverPUncertainty", "thetaUncertainty", "phiUncertainty",
+        "lifetimeSignedD0Significance", "lifetimeSignedZ0SinThetaSignificance",
+        "numberOfPixelHits", "numberOfSCTHits",
+        "numberOfInnermostPixelLayerHits", "numberOfNextToInnermostPixelLayerHits",
+        "numberOfInnermostPixelLayerSharedHits", "numberOfInnermostPixelLayerSplitHits",
+        "numberOfPixelSharedHits", "numberOfPixelSplitHits", "numberOfSCTSharedHits"
+    ],
+
+    "flip_fields": [
+        "lifetimeSignedD0Significance", "lifetimeSignedZ0SinThetaSignificance",
+        "d0", "z0SinTheta"
+    ],
+
+    "flip_origins": [3, 4],
+
+    "flavour_to_label": {"5": 0, "4": 1, "0": 2},
+    "class_names":      ["b-jet", "c-jet", "light-jet"],
+    "colours": {
+        "b-jet":      "#1f77b4",
+        "c-jet":      "#ff7f0e",
+        "light-jet":  "#2ca02c"
+    }
+}
