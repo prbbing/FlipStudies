@@ -403,7 +403,7 @@ for epoch in range(1, EPOCHS + 1):
           f"orig_acc={val_orig_acc:.4f}")
 
 # ── save model ────────────────────────────────────────────────────────
-torch.save(model.state_dict(), MODEL_NAME)
+torch.save(model.state_dict(), os.path.join(PLOT_DIR, MODEL_NAME))
 print(f"Saved {MODEL_NAME}")
 
 # ── final evaluation ──────────────────────────────────────────────────

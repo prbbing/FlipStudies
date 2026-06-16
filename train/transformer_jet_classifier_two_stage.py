@@ -21,7 +21,7 @@ import matplotlib.pyplot as plt
 _DEFAULTS = {
     # shared with validation script
     "top_k":          40,
-    "batch_size":     800,
+    "batch_size":     1-24,
     "n_origins":      8,
     "flip_sharpness": 10.0,
     "flip_threshold": 0.5,
@@ -50,18 +50,19 @@ _DEFAULTS = {
     "class_names":       ["b-jet", "c-jet", "light-jet"],
     "colours":           {"b-jet": "#1f77b4", "c-jet": "#ff7f0e", "light-jet": "#2ca02c"},
     # training-only
-    "train_file":      "/large-data/transformer/jetset/93940/mc-flavtag-ttbar-small.h5",
-    "n_train":         1_200_000,
-    "n_test":          600_000,
-    "epochs":          100,
+    "train_file":      "/large-data/transformer/jetset/93940/mc-flavtag-ttbar-large.h5",
+    "n_train":         12_000_000,
+    "n_test":          1_200_000,
+    "epochs":          50,
     "lr":              1e-3,
     "num_workers":     8,
-    "lambda_sym":      100,
+    "lambda_sym":      10,
     "lambda_orig":     1,
+    "tail_quartile":   0.1,
     "b_ratio":         0.0,
     "model_name":      "transformer_jet_classifier_nomimal_btrackorigin_training.pt",
-    "train_plot_dir":  "./transformer_results_nomimal_btrackorigin_training/",
-    "train_cache_dir": ".track_cache_new/",
+    "train_plot_dir":  "./transformer_results_btrackorigin_training/",
+    "train_cache_dir": ".track_cache_large/",
 }
 
 # ── args & config file ─────────────────────────────────────────────────
@@ -106,6 +107,7 @@ N_LAYERS        = cfg["n_layers"]
 D_FFN           = cfg["d_ffn"]
 DROPOUT         = cfg["dropout"]
 TRACK_FIELDS    = cfg["track_fields"]
+TAIL_QUARTILE   = cfg["tail_quartile"]
 FLIP_FIELDS     = cfg["flip_fields"]
 FLIP_ORIGINS    = cfg["flip_origins"]
 FLAVOUR_TO_LABEL = {int(k): v for k, v in cfg["flavour_to_label"].items()}
@@ -373,9 +375,9 @@ for epoch in range(1, EPOCHS + 1):
             p_post_light = p_post[light_mask]
             # b-score for light jets from the pre-flip stage
             b_score_light = p_pre_light[:, 0]
-            top10_thresh  = torch.quantile(b_score_light, 0.90)
-            top10_mask    = b_score_light >= top10_thresh
-            sym_loss_light = F.mse_loss(p_post_light[top10_mask], p_pre_light[top10_mask]) if top10_mask.any() else logits.new_tensor(0.0)
+            top_thresh  = torch.quantile(b_score_light, 1 - TAIL_QUARTILE)
+            top_mask    = b_score_light >= top_thresh
+            sym_loss_light = F.mse_loss(p_post_light[top_mask], p_pre_light[top_mask]) if top_mask.any() else logits.new_tensor(0.0)
         else:
             sym_loss_light = logits.new_tensor(0.0)
         sym_loss_b     = F.mse_loss(p_post[b_mask],     p_pre[b_mask])     if b_mask.any()     else logits.new_tensor(0.0)
@@ -432,7 +434,7 @@ for epoch in range(1, EPOCHS + 1):
           f"val_loss={val_loss:.4f}  val_acc={val_acc:.4f}")
 
 # ── save model ────────────────────────────────────────────────────────
-torch.save(model.state_dict(), MODEL_NAME)
+torch.save(model.state_dict(), os.path.join(PLOT_DIR, MODEL_NAME))
 print(f"Saved {MODEL_NAME}")
 
 # ── final evaluation ──────────────────────────────────────────────────
