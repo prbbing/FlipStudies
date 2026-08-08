@@ -19,24 +19,30 @@ import matplotlib.pyplot as plt
 
 # ── defaults ───────────────────────────────────────────────────────────
 _DEFAULTS = {
-    "train_file":      "/large-data/transformer/jetset/93940/mc-flavtag-ttbar-small.h5",
-    "n_train":         1_200_000,
-    "n_test":          600_000,
-    "batch_size":      1024,
-    "epochs":          100,
+    "train_file":      "/large-data/transformer/jetset/93940/mc-flavtag-ttbar-large.h5",
+    "n_train":         12_000_000,
+    "n_test":          1_200_000,
+    "batch_size":      32768,
+    "epochs":          200,
     "lr":              1e-3,
     "top_k":           40,
-    "lambda_sym":      0.0,
     "lambda_orig":     1,
+    "tail_start":      1,
+    "tail_min":        0.01,
+    "tail_decay":      0.0099,
+    "beta_start":      1,
+    "beta_max":        0.0,
+    "beta_increment":  0.99,
     "b_ratio":         0.0,
     "n_origins":       8,
+    "num_workers":     8,
     "model_name":      "transformer_jet_classifier_nominal.pt",
     "train_plot_dir":  "./transformer_results_nominal/",
-    "train_cache_dir": ".track_cache/",
+    "train_cache_dir": ".track_cache_large/",
     "d_model":         32,
     "n_heads":         2,
     "n_layers":        2,
-    "d_ffn":           32,
+    "d_ffn":           64,
     "dropout":         0.1,
     "track_fields": [
         "qOverP", "deta", "dphi", "d0", "z0SinTheta",
@@ -51,9 +57,6 @@ _DEFAULTS = {
         "lifetimeSignedD0Significance", "lifetimeSignedZ0SinThetaSignificance",
         "d0", "z0SinTheta",
     ],
-    # null means flip all tracks; list of ints selects specific origin classes
-    # 0=Pileup 1=Fake 2=Primary 3=From b 4=From b->c 5=From c 6=From tau 7=Other secondary
-    "flip_origins":      [3, 4],
     "flavour_to_label":  {"5": 0, "4": 1, "0": 2},
     "class_names":       ["b-jet", "c-jet", "light-jet"],
     "colours":           {"b-jet": "#1f77b4", "c-jet": "#ff7f0e", "light-jet": "#2ca02c"},
@@ -84,8 +87,13 @@ BATCH_SIZE      = cfg["batch_size"]
 EPOCHS          = cfg["epochs"]
 LR              = cfg["lr"]
 TOP_K           = cfg["top_k"]
-LAMBDA_SYM      = cfg["lambda_sym"]
 LAMBDA_ORIG     = cfg["lambda_orig"]
+TAIL_MIN        = cfg["tail_min"]
+TAIL_START      = cfg["tail_start"]
+TAIL_DECAY      = cfg["tail_decay"]
+BETA_MAX        = cfg["beta_max"]
+BETA_START      = cfg["beta_start"]
+BETA_INCREMENT  = cfg["beta_increment"]
 B_RATIO         = cfg["b_ratio"]
 N_ORIGINS       = cfg["n_origins"]
 DEVICE          = "cuda" if torch.cuda.is_available() else "cpu"
@@ -97,9 +105,9 @@ N_HEADS         = cfg["n_heads"]
 N_LAYERS        = cfg["n_layers"]
 D_FFN           = cfg["d_ffn"]
 DROPOUT         = cfg["dropout"]
+NUM_WORKERS     = cfg["num_workers"]
 TRACK_FIELDS    = cfg["track_fields"]
 FLIP_FIELDS     = cfg["flip_fields"]
-FLIP_ORIGINS    = cfg["flip_origins"]
 FLAVOUR_TO_LABEL = {int(k): v for k, v in cfg["flavour_to_label"].items()}
 CLASS_NAMES     = cfg["class_names"]
 COLOURS         = cfg["colours"]
@@ -231,7 +239,7 @@ class JetTransformer(nn.Module):
         h = self.encoder(h, src_key_padding_mask=src_key_padding_mask)
         # h[:, 0]  → CLS token  → jet classification
         # h[:, 1:] → track tokens → per-track origin classification
-        return self.classifier(h[:, 0]), self.origin_head(h[:, 1:])
+        return self.classifier(h[:, 0]), self.origin_head(h[:, 1:]), h[:, 0]
 
 
 # ── balanced index sampling ────────────────────────────────────────────
@@ -267,12 +275,13 @@ print(f"Train — b:{(y_train==0).sum():,}  c:{(y_train==1).sum():,}  light:{(y_
 print(f"Test  — b:{(y_test==0).sum():,}  c:{(y_test==1).sum():,}  light:{(y_test==2).sum():,}")
 
 _pin = DEVICE == "cuda"
+_pw  = NUM_WORKERS > 0
 train_loader = DataLoader(
     JetDatasetPaired(X_train, mask_train, X_train_flip, mask_train_flip, y_train, origins_train),
-    batch_size=BATCH_SIZE, shuffle=True, num_workers=8, pin_memory=_pin)
+    batch_size=BATCH_SIZE, shuffle=True, num_workers=NUM_WORKERS, pin_memory=_pin, persistent_workers=_pw)
 val_loader = DataLoader(
     JetDataset(X_test, mask_test, y_test, origins_test),
-    batch_size=BATCH_SIZE, num_workers=8, pin_memory=_pin)
+    batch_size=BATCH_SIZE, num_workers=NUM_WORKERS, pin_memory=_pin, persistent_workers=_pw)
 
 # ── input variable plot ────────────────────────────────────────────────
 tracks_flat = X_train.reshape(-1, N_FEATS)
@@ -308,8 +317,14 @@ print("Saved input_variables.png")
 model     = JetTransformer(N_FEATS, D_MODEL, N_HEADS, N_LAYERS, D_FFN, DROPOUT,
                            n_classes=3, n_origins=N_ORIGINS).to(DEVICE)
 optimiser = torch.optim.Adam(model.parameters(), lr=LR)
+_orig_flat   = origins_train.ravel()
+_valid_orig  = _orig_flat[_orig_flat >= 0]
+_origin_counts = np.bincount(_valid_orig, minlength=N_ORIGINS).astype(np.float64)
+_origin_weight = torch.tensor(
+    (_origin_counts.sum() / (N_ORIGINS * _origin_counts)).tolist(),
+    dtype=torch.float32, device=DEVICE)
 criterion        = nn.CrossEntropyLoss()
-criterion_origin = nn.CrossEntropyLoss(ignore_index=-1)
+criterion_origin = nn.CrossEntropyLoss(ignore_index=-1, weight=_origin_weight)
 
 n_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
 print(f"Parameters: {n_params:,}")
@@ -320,6 +335,9 @@ history = {"train_loss": [], "train_ce_loss": [], "train_sym_loss": [],
            "train_orig_loss": [], "val_loss": [], "val_acc": [], "val_orig_acc": []}
 
 for epoch in range(1, EPOCHS + 1):
+    tail_quartile = max(TAIL_MIN, TAIL_START - (epoch - 1) * TAIL_DECAY)
+    lambda_sym    = min(BETA_MAX, BETA_START + (epoch - 1) * BETA_INCREMENT)
+
     model.train()
     total_loss, total_ce, total_sym, total_orig = 0.0, 0.0, 0.0, 0.0
 
@@ -329,28 +347,39 @@ for epoch in range(1, EPOCHS + 1):
         y_b      = y_b.to(DEVICE);      origins_b   = origins_b.to(DEVICE)
         optimiser.zero_grad()
 
-        logits,      track_logits      = model(X_b,      mask_b)
-        logits_flip, track_logits_flip = model(X_flip_b, mask_flip_b)
+        logits,      track_logits,      h_nom  = model(X_b,      mask_b)
+        logits_flip, track_logits_flip, h_flip = model(X_flip_b, mask_flip_b)
 
         ce_loss = criterion(logits, y_b)
 
-        light_mask   = (y_b == 2)
-        p_nom_light  = torch.softmax(logits[light_mask],      dim=1)
-        p_flip_light = torch.softmax(logits_flip[light_mask], dim=1)
-        b_mask       = (y_b == 0)
-        p_nom_b      = torch.softmax(logits[b_mask],      dim=1)
-        p_flip_b     = torch.softmax(logits_flip[b_mask], dim=1)
+        # Representation symmetry loss: cosine-similarity between nom/flip CLS tokens
+        light_mask = (y_b == 2)
+        b_mask     = (y_b == 0)
+        if light_mask.any():
+            p_nom_light = torch.softmax(logits[light_mask], dim=1)
+            pb_light    = p_nom_light[:, 0]
+            top_thresh  = torch.quantile(pb_light, 1 - tail_quartile)
+            top_mask    = pb_light >= top_thresh
+            if top_mask.any():
+                sym_loss_light = (1 - F.cosine_similarity(h_flip[light_mask][top_mask], h_nom[light_mask][top_mask], dim=1)).mean()
+            else:
+                sym_loss_light = logits.new_tensor(0.0)
+        else:
+            sym_loss_light = logits.new_tensor(0.0)
 
-        sym_loss_light = F.mse_loss(p_nom_light, p_flip_light) if light_mask.any() else logits.new_tensor(0.0)
-        sym_loss_b     = F.mse_loss(p_nom_b,     p_flip_b)     if b_mask.any()     else logits.new_tensor(0.0)
-        sym_loss       = sym_loss_light - B_RATIO * sym_loss_b
+        if b_mask.any():
+            sym_loss_b = (1 - F.cosine_similarity(h_flip[b_mask], h_nom[b_mask], dim=1)).mean()
+        else:
+            sym_loss_b = logits.new_tensor(0.0)
+
+        sym_loss = sym_loss_light - B_RATIO * sym_loss_b
 
         origin_loss = criterion_origin(
             track_logits.reshape(-1, N_ORIGINS),
             origins_b.reshape(-1),
         )
 
-        loss = ce_loss + LAMBDA_SYM * sym_loss + LAMBDA_ORIG * origin_loss
+        loss = ce_loss + lambda_sym * sym_loss + LAMBDA_ORIG * origin_loss
 
         loss.backward()
         optimiser.step()
@@ -372,7 +401,7 @@ for epoch in range(1, EPOCHS + 1):
         for X_b, mask_b, y_b, origins_b in val_loader:
             X_b, mask_b, y_b = X_b.to(DEVICE), mask_b.to(DEVICE), y_b.to(DEVICE)
             origins_b = origins_b.to(DEVICE)
-            logits, track_logits = model(X_b, mask_b)
+            logits, track_logits, _ = model(X_b, mask_b)
             val_loss += criterion(logits, y_b).item() * len(y_b)
             preds = logits.argmax(dim=1)
             correct += (preds == y_b).sum().item()
@@ -422,7 +451,7 @@ fig.suptitle("Transformer jet classifier — training summary", fontweight="bold
 ep = range(1, EPOCHS + 1)
 axes[0].plot(ep, history["train_loss"],     label="train (total)")
 axes[0].plot(ep, history["train_ce_loss"],  label="train CE",  linestyle="--")
-axes[0].plot(ep, history["train_sym_loss"], label=f"train sym (×{LAMBDA_SYM})", linestyle=":")
+axes[0].plot(ep, history["train_sym_loss"], label=f"train sym (×{BETA_START}→{BETA_MAX})", linestyle=":")
 axes[0].plot(ep, history["val_loss"],       label="val")
 axes[0].set_title("Loss"); axes[0].set_xlabel("Epoch"); axes[0].legend(fontsize=7)
 
