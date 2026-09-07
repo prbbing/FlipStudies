@@ -21,10 +21,10 @@ import matplotlib.pyplot as plt
 _DEFAULTS = {
     # shared with validation script
     "top_k":          40,
-    "batch_size":     32768,
+    "batch_size":     58982,
     "n_origins":      8,
-    "flip_sharpness": 10.0,
-    "flip_threshold": 0.7,
+    "flip_sharpness": 100.0,
+    "flip_threshold": 0.95,
     "d_model":        32,
     "n_heads":        2,
     "n_layers":       2,
@@ -59,15 +59,17 @@ _DEFAULTS = {
     "num_workers":     8,
     "lambda_orig":     1,
     "tail_start":      1,
-    "tail_min":        0.01,
-    "tail_decay":      0.0099,
+    "tail_min":        0.002,
+    "tail_decay":      0.01,
     "beta_start":      1,
-    "beta_max":        100.0,
-    "beta_increment":  0.99,
-    "b_ratio":         0.0,
-    "model_name":      "transformer_jet_classifier_nomimal_btrackorigin_training_gradual.pt",
+    "beta_max":        1000.0,
+    "beta_increment":  6.666,
+    "symmetry_start":  50,
+    "b_ratio":         1,
+    "l_start":         100,
+    "model_name":      "transformer_jet_classifier_nomimal_btrackorigin_training_sym1000_alpha100.pt",
     #"train_plot_dir":  "./transformer_results_btrackorigin_training/",
-    "train_plot_dir":  "./transformer_jet_classifier_nomimal_btrackorigin_training_gradual_0p7/",
+    "train_plot_dir":  "./transformer_jet_classifier_nomimal_btrackorigin_training_sym1000_alpha100_tail0p002_start50/",
     "train_cache_dir": ".track_cache_large/",
 }
 
@@ -102,7 +104,7 @@ B_RATIO         = cfg["b_ratio"]
 FLIP_SHARPNESS  = cfg["flip_sharpness"]
 FLIP_THRESHOLD  = cfg["flip_threshold"]
 N_ORIGINS       = cfg["n_origins"]
-DEVICE          = "cuda" if torch.cuda.is_available() else "cpu"
+DEVICE          = "cuda:1" if torch.cuda.is_available() else "cpu"
 MODEL_NAME      = cfg["model_name"]
 PLOT_DIR        = cfg["train_plot_dir"]
 CACHE_DIR       = cfg["train_cache_dir"]
@@ -118,6 +120,8 @@ TAIL_DECAY      = cfg["tail_decay"]
 BETA_MAX        = cfg["beta_max"]
 BETA_START      = cfg["beta_start"]
 BETA_INCREMENT  = cfg["beta_increment"]
+SYMMETRY_START  = cfg["symmetry_start"]
+L_START  = cfg["l_start"]
 FLIP_FIELDS     = cfg["flip_fields"]
 FLIP_ORIGINS    = cfg["flip_origins"]
 FLAVOUR_TO_LABEL = {int(k): v for k, v in cfg["flavour_to_label"].items()}
@@ -157,7 +161,7 @@ def load_tracks(path, idx):
         valid  = f["tracks"]["valid"][fidx]
         d0     = f["tracks"]["lifetimeSignedD0"][fidx].astype(np.float32)
         ip2d   = f["tracks"]["lifetimeSignedD0Significance"][fidx].astype(np.float32)
-        origin = f["tracks"]["GN2v01_trackOrigin"][fidx].astype(np.int8)
+        origin = f["tracks"]["ftagTruthOriginLabel"][fidx].astype(np.int8)
         arrs   = {fld: f["tracks"][fld][fidx].astype(np.float32) for fld in TRACK_FIELDS}
 
     keep = valid & (np.abs(d0) < 3.5)
@@ -303,7 +307,7 @@ X_test,  mask_test,  y_test,  origins_test  = load_tracks(TRAIN_FILE, test_idx)
 print(f"Train — b:{(y_train==0).sum():,}  c:{(y_train==1).sum():,}  light:{(y_train==2).sum():,}")
 print(f"Test  — b:{(y_test==0).sum():,}  c:{(y_test==1).sum():,}  light:{(y_test==2).sum():,}")
 
-_pin = DEVICE == "cuda"
+_pin = DEVICE == "cuda:1"
 _pw  = NUM_WORKERS > 0
 train_loader = DataLoader(
     JetDataset(X_train, mask_train, y_train, origins_train),
@@ -371,8 +375,13 @@ print(f"Device: {DEVICE}  |  Train: {len(y_train):,}  |  Test: {len(y_test):,}\n
 history = {"train_loss": [], "train_ce_loss": [], "train_sym_loss": [], "train_origin_loss": [], "val_loss": [], "val_acc": []}
 
 for epoch in range(1, EPOCHS + 1):
-    tail_quartile = max(TAIL_MIN, TAIL_START - (epoch - 1) * TAIL_DECAY)
-    lambda_sym    = min(BETA_MAX, BETA_START + (epoch - 1) * BETA_INCREMENT)
+    tail_quartile = max(TAIL_MIN, TAIL_START - (epoch - 1 - L_START) * TAIL_DECAY)
+    lambda_sym = 0
+    if epoch > SYMMETRY_START:
+        lambda_sym = min(BETA_MAX, BETA_START + (epoch - 50) * BETA_INCREMENT)
+    L_RATIO = 0
+    if epoch > L_START:
+        L_RATIO = 1
 
     model.train()
     total_loss, total_ce, total_sym, total_orig = 0.0, 0.0, 0.0, 0.0
@@ -409,7 +418,7 @@ for epoch in range(1, EPOCHS + 1):
         else:
             sym_loss_b = logits.new_tensor(0.0)
 
-        sym_loss = sym_loss_light - B_RATIO * sym_loss_b
+        sym_loss = L_RATIO * sym_loss_light - B_RATIO * sym_loss_b
 
         # Track origin classification loss (Stage 1, unflipped, ignore padding=-1)
         origin_loss = criterion_origin(

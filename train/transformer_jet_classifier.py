@@ -29,21 +29,24 @@ _DEFAULTS = {
     "lambda_orig":     1,
     "tail_start":      1,
     "tail_min":        0.01,
-    "tail_decay":      0.0099,
+    "tail_decay":      0.0066,
     "beta_start":      1,
-    "beta_max":        0.0,
-    "beta_increment":  0.99,
+    "beta_max":        1000,
+    "beta_increment":  6.666,
     "b_ratio":         0.0,
     "n_origins":       8,
     "num_workers":     8,
-    "model_name":      "transformer_jet_classifier_nominal.pt",
-    "train_plot_dir":  "./transformer_results_nominal/",
+    "model_name":      "transformer_jet_classifier_sym1000.pt",
+    "train_plot_dir":  "./transformer_results_sym1000/",
     "train_cache_dir": ".track_cache_large/",
     "d_model":         32,
     "n_heads":         2,
     "n_layers":        2,
     "d_ffn":           64,
     "dropout":         0.1,
+    # null means flip all tracks; list of ints selects specific origin classes
+    # 0=Pileup 1=Fake 2=Primary 3=From b 4=From b->c 5=From c 6=From tau 7=Other secondary
+    "flip_origins":    None,
     "track_fields": [
         "qOverP", "deta", "dphi", "d0", "z0SinTheta",
         "qOverPUncertainty", "thetaUncertainty", "phiUncertainty",
@@ -108,6 +111,7 @@ DROPOUT         = cfg["dropout"]
 NUM_WORKERS     = cfg["num_workers"]
 TRACK_FIELDS    = cfg["track_fields"]
 FLIP_FIELDS     = cfg["flip_fields"]
+FLIP_ORIGINS    = cfg["flip_origins"]
 FLAVOUR_TO_LABEL = {int(k): v for k, v in cfg["flavour_to_label"].items()}
 CLASS_NAMES     = cfg["class_names"]
 COLOURS         = cfg["colours"]
@@ -125,7 +129,12 @@ print(f"Config saved to {_cfg_save_path}")
 # ── data loading ──────────────────────────────────────────────────────
 def _cache_key(idx, flip):
     h = hashlib.md5(idx.tobytes()).hexdigest()[:12]
-    tag = "flip" if flip else "nom"
+    if not flip:
+        tag = "nom"
+    elif FLIP_ORIGINS is None:
+        tag = "flip_all"
+    else:
+        tag = "flip_orig" + "_".join(str(o) for o in sorted(FLIP_ORIGINS))
     return os.path.join(CACHE_DIR, f"tracks_{h}_{tag}.npz")
 
 
@@ -147,11 +156,16 @@ def load_tracks(path, idx, flip=False):
         valid  = f["tracks"]["valid"][fidx]
         d0     = f["tracks"]["d0"][fidx].astype(np.float32)
         ip2d   = f["tracks"]["lifetimeSignedD0Significance"][fidx].astype(np.float32)
-        origin = f["tracks"]["GN2v01_trackOrigin"][fidx].astype(np.int8)
+        origin = f["tracks"]["ftagTruthOriginLabel"][fidx].astype(np.int8)
         arrs   = {fld: f["tracks"][fld][fidx].astype(np.float32) for fld in TRACK_FIELDS}
 
+    # flip_mask: (N, T) bool — True for tracks that should be sign-flipped
     if flip:
-        ip2d = -ip2d
+        if FLIP_ORIGINS is None:
+            flip_mask = valid.copy()
+        else:
+            flip_mask = np.isin(origin, FLIP_ORIGINS) & valid
+        ip2d = np.where(flip_mask, -ip2d, ip2d)
     keep = valid & (np.abs(d0) < 3.5)
 
     sort_key = ip2d.copy()
@@ -162,7 +176,7 @@ def load_tracks(path, idx, flip=False):
     for fld in TRACK_FIELDS:
         arr = arrs[fld]
         if flip and fld in FLIP_FIELDS:
-            arr = -arr
+            arr = np.where(flip_mask, -arr, arr)
         feat_list.append(arr)
     feats = np.stack(feat_list, axis=-1)
 
